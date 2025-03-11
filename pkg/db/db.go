@@ -5,15 +5,19 @@ import (
 	"database/sql"
 	_ "embed"
 	"strings"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/lib/pq"
 	"github.com/obot-platform/kinm/pkg/db/errors"
+	"github.com/obot-platform/kinm/pkg/db/glogrus"
 	"github.com/obot-platform/kinm/pkg/db/statements"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/fields"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 )
+
+var logger = glogrus.New(glogrus.Config{})
 
 type db struct {
 	sqlDB           *sql.DB
@@ -127,6 +131,10 @@ func (d *db) beginTx(ctx context.Context, options *sql.TxOptions) (context.Conte
 }
 
 func (d *db) get(ctx context.Context, namespace, name string) (*record, error) {
+	start := time.Now()
+	defer func() {
+		logger.Info(ctx, "KINM Get %s/%s took %s", namespace, name, time.Since(start))
+	}()
 	_, records, err := d.list(ctx, getNamespace(namespace), &name, 0, false, 0, 1, nil)
 	if err != nil {
 		return nil, err
@@ -161,11 +169,27 @@ func (d *db) list(ctx context.Context, namespace, name *string, rev int64, after
 		}
 	}
 
+	start := time.Now()
+	timing := map[string]time.Duration{}
+	defer func(s time.Time) {
+		timing["total"] = time.Since(s)
+		var ns, nm string
+		if namespace != nil {
+			ns = *namespace
+		}
+		if name != nil {
+			nm = *name
+		}
+		logger.Info(ctx, "KINM List %s/%s took %v", ns, nm, timing)
+	}(start)
+
+	start = time.Now()
 	ctx, tx, err := d.beginTx(ctx, &sql.TxOptions{
 		// Repeatable read is needed to ensure that the ListID is consistent across multiple queries
 		Isolation: sql.LevelRepeatableRead,
 		ReadOnly:  true,
 	})
+	timing["beginTx"] = time.Since(start)
 	if err != nil {
 		return tableMeta{}, nil, err
 	}
@@ -173,7 +197,9 @@ func (d *db) list(ctx context.Context, namespace, name *string, rev int64, after
 		_ = tx.Rollback()
 	}()
 
+	start = time.Now()
 	meta, records, err := d.doList(ctx, namespace, name, rev, after, cont, limit, vals)
+	timing["doList"] = time.Since(start)
 	if err != nil {
 		return tableMeta{}, nil, err
 	}
@@ -186,7 +212,9 @@ func (d *db) list(ctx context.Context, namespace, name *string, rev int64, after
 	// this can possibly be zero if when no results were found. Also notice the isolation is repeatable read
 	// so that we will get the same ID that was used in the first query
 	if meta.ListID == 0 {
+		start = time.Now()
 		meta, err = d.getTableMeta(ctx)
+		timing["getTableMeta"] = time.Since(start)
 		if err != nil {
 			return tableMeta{}, nil, err
 		}
@@ -200,6 +228,10 @@ func (d *db) list(ctx context.Context, namespace, name *string, rev int64, after
 		return meta, nil, errors.NewCompactionError(uint(meta.ListID), uint(meta.CompactionID))
 	}
 
+	start = time.Now()
+	defer func() {
+		timing["commit"] = time.Since(start)
+	}()
 	return meta, records, tx.Commit()
 }
 
@@ -209,6 +241,20 @@ func (d *db) getTableMeta(ctx context.Context) (meta tableMeta, _ error) {
 }
 
 func (d *db) doList(ctx context.Context, namespace, name *string, rev int64, after bool, cont, limit int64, vals []any) (meta tableMeta, _ []record, _ error) {
+	start := time.Now()
+	timing := map[string]time.Duration{}
+	defer func(s time.Time) {
+		timing["total"] = time.Since(s)
+		var ns, nm string
+		if namespace != nil {
+			ns = *namespace
+		}
+		if name != nil {
+			nm = *name
+		}
+
+		logger.Info(ctx, "KINM doList %s/%s took %v", ns, nm, timing)
+	}(start)
 	var (
 		rows *sql.Rows
 		err  error
@@ -219,6 +265,7 @@ func (d *db) doList(ctx context.Context, namespace, name *string, rev int64, aft
 		panic("vals must have the same length as extraFieldNames")
 	}
 
+	start = time.Now()
 	if after {
 		vals = append([]any{namespace, name, rev}, vals...)
 		rows, err = d.queryContext(ctx, d.stmt.ListAfterSQL(limit), vals...)
@@ -226,11 +273,13 @@ func (d *db) doList(ctx context.Context, namespace, name *string, rev int64, aft
 		vals = append([]any{namespace, name, rev, cont}, vals...)
 		rows, err = d.queryContext(ctx, d.stmt.ListSQL(limit), vals...)
 	}
+	timing["query"] = time.Since(start)
 	if err != nil {
 		return meta, nil, err
 	}
 	defer rows.Close()
 
+	start = time.Now()
 	var records []record
 	for rows.Next() {
 		var (
@@ -248,6 +297,7 @@ func (d *db) doList(ctx context.Context, namespace, name *string, rev int64, aft
 		}
 		records = append(records, r)
 	}
+	timing["scan"] = time.Since(start)
 	return meta, records, nil
 }
 
