@@ -406,9 +406,18 @@ func (d *db) doInsert(ctx context.Context, rec record) (id int64, err error) {
 }
 
 func (d *db) delete(ctx context.Context, r record) (int64, error) {
+	start := time.Now()
+	timing := map[string]time.Duration{}
+	defer func(s time.Time) {
+		timing["total"] = time.Since(s)
+		logger.Info(ctx, "KINM Delete %s/%s took %v", r.namespace, r.name, timing)
+	}(start)
+
+	start = time.Now()
 	ctx, tx, err := d.beginTx(ctx, &sql.TxOptions{
 		Isolation: sql.LevelRepeatableRead,
 	})
+	timing["beginTx"] = time.Since(start)
 	if err != nil {
 		return 0, err
 	}
@@ -423,12 +432,17 @@ func (d *db) delete(ctx context.Context, r record) (int64, error) {
 	r.created = 0
 	r.deleted = 1
 
+	start = time.Now()
 	id, err := d.doInsert(ctx, r)
+	timing["doInsert"] = time.Since(start)
 	if err != nil {
 		return 0, err
 	}
 
-	if _, err := d.execContext(ctx, d.stmt.ClearCreatedSQL(), r.namespace, r.name, id); err != nil {
+	start = time.Now()
+	_, err = d.execContext(ctx, d.stmt.ClearCreatedSQL(), r.namespace, r.name, id)
+	timing["clearCreated"] = time.Since(start)
+	if err != nil {
 		return 0, err
 	}
 
