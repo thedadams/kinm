@@ -302,9 +302,18 @@ func (d *db) doList(ctx context.Context, namespace, name *string, rev int64, aft
 }
 
 func (d *db) insert(ctx context.Context, rec record) (id int64, _ error) {
+	start := time.Now()
+	timing := map[string]time.Duration{}
+	defer func(s time.Time) {
+		timing["total"] = time.Since(s)
+		logger.Info(ctx, "KINM Insert %s/%s took %v", rec.namespace, rec.name, timing)
+	}(start)
+
+	start = time.Now()
 	ctx, tx, err := d.beginTx(ctx, &sql.TxOptions{
 		Isolation: sql.LevelRepeatableRead,
 	})
+	timing["beginTx"] = time.Since(start)
 	if err != nil {
 		return 0, err
 	}
@@ -312,7 +321,9 @@ func (d *db) insert(ctx context.Context, rec record) (id int64, _ error) {
 		_ = tx.Rollback()
 	}()
 
+	start = time.Now()
 	id, err = d.doInsert(ctx, rec)
+	timing["doInsert"] = time.Since(start)
 	if err != nil {
 		return 0, err
 	}
@@ -329,13 +340,22 @@ type sqlCode interface {
 }
 
 func (d *db) doInsert(ctx context.Context, rec record) (id int64, err error) {
+	start := time.Now()
+	timing := map[string]time.Duration{}
+	defer func(s time.Time) {
+		timing["total"] = time.Since(s)
+		logger.Info(ctx, "KINM doInsert %s/%s took %v", rec.namespace, rec.name, timing)
+	}(start)
+
 	if rec.vals == nil {
 		rec.vals = make([]any, len(d.extraFieldNames))
 	} else if len(rec.vals) != len(d.extraFieldNames) {
 		panic("vals must have the same length as extraFieldNames")
 	}
 
+	start = time.Now()
 	_, err = d.execContext(ctx, d.stmt.TableLockSQL())
+	timing["tableLock"] = time.Since(start)
 	if err != nil {
 		return 0, err
 	}
@@ -372,7 +392,9 @@ func (d *db) doInsert(ctx context.Context, rec record) (id int64, err error) {
 	}
 
 	args := append([]any{rec.name, rec.namespace, rec.previousID, rec.uid, createdAny, rec.deleted, rec.value}, rec.vals...)
+	start = time.Now()
 	err = d.queryRowContext(ctx, d.stmt.InsertSQL(), args...).Scan(&id)
+	timing["queryRow"] = time.Since(start)
 	if pgErr, ok := err.(sqlError); ok && pgErr.SQLState() == "23505" {
 		return 0, errors.NewAlreadyExists(d.gvk, rec.name)
 	} else if sqliteErr, ok := err.(sqlCode); ok && sqliteErr.Code() == 2067 {
