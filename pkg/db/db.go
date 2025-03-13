@@ -132,10 +132,15 @@ func (d *db) beginTx(ctx context.Context, options *sql.TxOptions) (context.Conte
 
 func (d *db) get(ctx context.Context, namespace, name string) (*record, error) {
 	start := time.Now()
-	defer func() {
-		logger.Info(ctx, "KINM Get %s/%s took %s", namespace, name, time.Since(start))
-	}()
+	timing := map[string]time.Duration{}
+	defer func(s time.Time) {
+		timing["total"] = time.Since(s)
+		logger.Info(ctx, "KINM Get %s/%s took %v", namespace, name, timing)
+	}(start)
+
+	start = time.Now()
 	_, records, err := d.list(ctx, getNamespace(namespace), &name, 0, false, 0, 1, nil)
+	timing["list"] = time.Since(start)
 	if err != nil {
 		return nil, err
 	}

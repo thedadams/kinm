@@ -50,5 +50,5 @@ func NewResourceVersionMismatch(gvk schema.GroupVersionKind, name string) error 
 	return apierrors.NewConflict(schema.GroupResource{
 		Group:    gvk.Group,
 		Resource: gvk.Kind,
-	}, name, fmt.Errorf(OptimisticLockErrorMsg))
+	}, name, fmt.Errorf("%s", OptimisticLockErrorMsg))
 }
